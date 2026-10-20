@@ -1,5 +1,12 @@
 import json
-from ollama import chat, ChatResponse
+from ollama import Client, chat, ChatResponse
+from typing import List, Dict, Any
+
+
+MODEL = "gemma4:26b"
+OLLAMA_HOST = "http://localhost:11434"
+
+client = Client(host=OLLAMA_HOST)
 
 # Function Implementations
 def calculate(a: float, b: float, operation: str):
@@ -62,39 +69,173 @@ messages = [
     {"role": "user", "content": "What is 5 plus 5?"}
 ]
 
-response: ChatResponse = chat(
-    "gemma4:26b",
-    messages=messages,
-    tools=tools,
-)
 
-print("First response:", response.message)
+class ReactAgent:
 
-if response.message.tool_calls:
+    def __init__(
+        self,
+        model: str = MODEL,
+        host: str = OLLAMA_HOST
+    ):
+        self.model = model
+        self.client = Client(host=host)
+        self.max_iterations = 10
 
-    # Find the tool call content
-    tool_call = response.message.tool_calls[0]
+    def _complete(
+        self,
+        messages: List[Dict[str, Any]]
+    ) -> ChatResponse:
 
-    # Extract tool name and arguments
-    function_name = tool_call.function.name
-    function_args = tool_call.function.arguments
+        return self.client.chat(
+            model=self.model,
+            messages=messages,
+            tools=tools
+        )
 
-    # Call the function
-    function_to_call = available_functions[function_name]
-    function_response = function_to_call(**function_args)
+    def run(
+        self,
+        messages: List[Dict[str, Any]]
+    ) -> str:
 
-    print("Function response:", function_response)
+        """
+        Run the ReAct loop until we get a final answer.
+        """
 
-    # Add function response to messages for the model to use
-    messages.append(response.message)
-    messages.append({
-        "role": "tool", 
-        "name": function_name,
-        "content": json.dumps(function_response), 
-    })
+        iteration = 0
 
-    # Get final response from model
-    final_response = chat("gemma4:26b", messages=messages)
-    print("Second response:", final_response.message.content)
-else:
-    print("No tool calls returned from model")
+        while iteration < self.max_iterations:
+
+            iteration += 1
+
+            print(f"\n--- Iteration {iteration} ---")
+
+            # Call local Ollama model
+            response = self._complete(messages)
+
+            response_message = response.message
+
+            print(f"LLM Response: {response_message}")
+
+            # Add assistant response to conversation history
+            messages.append(
+                response_message.model_dump(exclude_none=True)
+            )
+
+            # Check if model requested tool calls
+            if response_message.tool_calls:
+
+                # Process ALL tool calls
+                for tool_call in response_message.tool_calls:
+
+                    function_name = tool_call.function.name
+
+                    # Ollama returns arguments as a dictionary
+                    function_args = tool_call.function.arguments
+
+                    print(
+                        f"Executing tool: "
+                        f"{function_name}({function_args})"
+                    )
+
+                    # Find requested function
+                    function_to_call = available_functions.get(
+                        function_name
+                    )
+
+                    if function_to_call is None:
+
+                        function_response = {
+                            "error": f"Unknown function: {function_name}"
+                        }
+
+                    else:
+
+                        try:
+                            function_response = function_to_call(
+                                **function_args
+                            )
+
+                        except (TypeError, ValueError) as e:
+
+                            function_response = {
+                                "error": str(e)
+                            }
+
+                    print(f"Tool result: {function_response}")
+
+                    # Add tool result to conversation history
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": function_name,
+                            "content": json.dumps(function_response)
+                        }
+                    )
+
+                # Continue ReAct loop
+                continue
+
+            else:
+
+                # No tool calls - final answer
+                final_content = response_message.content or ""
+
+                print(f"\nFinal answer: {final_content}")
+
+                return final_content
+
+        return (
+            "Error: Maximum iterations reached "
+            "without getting a final answer."
+        )
+
+
+# ==========================================
+# Main
+# ==========================================
+
+def main():
+
+    print(f"Using model: {MODEL}")
+    print(f"Ollama host: {OLLAMA_HOST}")
+    print("Type 'exit' to quit.\n")
+
+    agent = ReactAgent()
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an AI assistant that performs mathematical calculations based on user input."                
+            )
+        }
+    ]
+
+    while True:
+
+        # Get user input
+        user_input = input("\nYou: ").strip()
+
+        # Exit application
+        if user_input.lower() in ["exit", "quit"]:
+            print("Goodbye!")
+            break
+
+        # Ignore empty input
+        if not user_input:
+            continue
+
+        # Add user message to conversation
+        messages.append({
+            "role": "user",
+            "content": user_input
+        })
+
+        # Run ReAct agent
+        result = agent.run(messages)
+
+        print(f"\nAssistant: {result}")
+
+
+if __name__ == "__main__":
+    main()
